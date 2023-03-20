@@ -3,14 +3,17 @@
 #include <tuple>
 #include <stdexcept>
 #include <source_location>
-#include <memory>
-#include <coroutine>
+#include <filesystem>
 
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 
-#include <wayland-client.h>
-#include "xdg-shell-v6-client.h"
-#include "zwp-tablet-v2-client.h"
+#include <wayland-client.hpp>
+#include <wayland-client-protocol-extra.hpp>
+// #include "xdg-shell-v6-client.h"
+// #include "zwp-tablet-v2-client.h"
 
 #pragma GCC diagnostic push
 # pragma GCC diagnostic ignored "-Wdeprecated-declarations"
@@ -45,37 +48,6 @@ namespace std
 
 namespace aux
 {
-    inline auto lamed(auto&& closure) noexcept {
-        static auto cache = closure;
-        return [](auto... args) {
-            return cache(args...);
-        };
-    }
-
-    struct application_error : std::runtime_error {
-        std::source_location loc;
-        application_error(std::source_location&& loc) noexcept
-            : std::runtime_error("application error")
-            , loc(loc)
-            {            
-            }
-        template <class Ch>
-        friend auto& operator<<(std::basic_ostream<Ch>& output, application_error const& ex) {
-            return output << ex.loc.file_name() << ':'
-                          << ex.loc.line() << ':'
-                          << ex.loc.column() << ':'
-                          << ex.loc.function_name();
-        }
-    };
-
-    template <class T, class D>
-    auto safe_ptr(T* ptr, D del, auto&& loc = std::source_location::current()) {
-        if (ptr == nullptr) {
-            throw application_error(std::move(loc));
-        }
-        return std::unique_ptr<T, D>(ptr, del);
-    }
-
     class safe_fd final {
     public:
         safe_fd(safe_fd const&) = delete;
@@ -106,83 +78,102 @@ namespace aux
     private:
         int fd;
     };
-
-} // ::aux
-
-namespace aux::inline wayland_client_helper
-{
-    inline auto safe_ptr(wl_display* ptr, std::source_location&& loc = std::source_location::current()) {
-        return aux::safe_ptr(ptr, wl_display_disconnect, std::move(loc));
-    }
-#  define INTERN_SAFE_PTR(WL_CLIENT) \
-    inline auto safe_ptr(WL_CLIENT* ptr, std::source_location&& loc = std::source_location::current()) {  \
-        return aux::safe_ptr(ptr, WL_CLIENT##_destroy, std::move(loc)); \
-    }
-    INTERN_SAFE_PTR(wl_registry)
-    INTERN_SAFE_PTR(wl_compositor)
-    INTERN_SAFE_PTR(wl_shm)
-    INTERN_SAFE_PTR(wl_seat)
-    INTERN_SAFE_PTR(wl_surface)
-    INTERN_SAFE_PTR(wl_keyboard)
-    INTERN_SAFE_PTR(wl_pointer)
-    INTERN_SAFE_PTR(wl_touch)
-    INTERN_SAFE_PTR(zxdg_shell_v6)
-    INTERN_SAFE_PTR(zxdg_surface_v6)
-    INTERN_SAFE_PTR(zwp_tablet_manager_v2)
-#  undef INTERN_SAFE_PTR
-
-    template <class WL_CLIENT> struct wl_listener { using type = void; };
-#  define INTERN_LISTENER(WL_CLIENT)                                      \
-    template <> struct wl_listener<WL_CLIENT> { using type = WL_CLIENT##_listener; };
-    INTERN_LISTENER(wl_registry)
-    INTERN_LISTENER(wl_seat)
-    INTERN_LISTENER(zxdg_shell_v6)
-    INTERN_LISTENER(zxdg_surface_v6)
-    INTERN_LISTENER(wl_pointer)
-    INTERN_LISTENER(wl_keyboard)
-    INTERN_LISTENER(wl_touch)
-#  undef INTERN_LISTENER
-
-    template <class WL_CLIENT>
-    auto add_listener(WL_CLIENT* client,
-                      typename wl_listener<WL_CLIENT>::type&& listener,
-                      void* data = nullptr,
-                      std::source_location&& loc = std::source_location::current()) {
-        if (0 != wl_proxy_add_listener(reinterpret_cast<wl_proxy*>(client),
-                                       reinterpret_cast<void(**)(void)>(&listener),
-                                       data)) {
-            throw loc;
-        }
-        return listener;
-    }
-
-    template <class> constexpr wl_interface const *const interface_pointer = nullptr;
-#  define INTERN_INTERFACE(WL_CLIENT)                                     \
-    template <> constexpr wl_interface const *const interface_pointer<WL_CLIENT> = &WL_CLIENT##_interface;
-    INTERN_INTERFACE(wl_compositor)
-    INTERN_INTERFACE(wl_shm)
-    INTERN_INTERFACE(wl_seat)
-    INTERN_INTERFACE(zxdg_shell_v6)
-    INTERN_INTERFACE(zwp_tablet_manager_v2)
-#  undef INTERN_INTERFACE
-
-} // ::aux::wayland_client_helper
+}
 
 int main() {
-    try {
-        auto display = aux::safe_ptr(wl_display_connect(nullptr));
-        auto registry = aux::safe_ptr(wl_display_get_registry(display.get()));
-
-        auto registry_listener = aux::add_listener(registry.get(), {
-                .global = aux::lamed([&](auto...) {
-                }),
-                .global_remove = aux::lamed([&](auto...) {
-                    throw aux::application_error(std::source_location());
-                }),
-            });
+    wayland::display_t display;
+    if (false == display) {
+        return -1;
     }
-    catch (aux::application_error& ex) {
-        std::cout << ex << std::endl;
+    wayland::registry_t registry = display.get_registry();
+    wayland::compositor_t compositor;
+    wayland::xdg_wm_base_t shell;
+    wayland::seat_t seat;
+    wayland::shm_t shm;
+    registry.on_global() = [&](uint32_t name, std::string_view interface, uint32_t version) {
+        if (interface == wayland::compositor_t::interface_name) {
+            registry.bind(name, compositor, version);
+        }
+        else if (interface == wayland::xdg_wm_base_t::interface_name) {
+            registry.bind(name, shell, version);
+        }
+        else if (interface == wayland::seat_t::interface_name) {
+            registry.bind(name, seat, version);
+        }
+        else if (interface == wayland::shm_t::interface_name) {
+            registry.bind(name, shm, version);
+        }
+    };
+    display.roundtrip();
+    if (false == compositor && shell && seat && shm) {
+        return -1;
+    }
+
+    auto surface = compositor.create_surface();
+    shell.on_ping() = [&](uint32_t serial) noexcept { shell.pong(serial); };
+    auto xsurface = shell.get_xdg_surface(surface);
+    xsurface.on_configure() = [&](uint32_t serial) noexcept { xsurface.ack_configure(serial); };
+    auto toplevel = xsurface.get_toplevel();
+    toplevel.set_title("default caption");
+    bool running = true;
+    toplevel.on_close() = [&]() noexcept { running = false; };
+
+    bool has_keyboard = false;
+    bool has_pointer = false;
+    bool has_touch = false;
+    seat.on_capabilities() = [&](auto capability) {
+        has_keyboard = capability & wayland::seat_capability::keyboard;
+        has_pointer = capability & wayland::seat_capability::pointer;
+        has_touch = capability & wayland::seat_capability::touch;
+    };
+    display.roundtrip();
+    if (false == has_keyboard && has_pointer && has_touch) {
+        return -1;
+    }
+    auto keyboard = seat.get_keyboard();
+    auto pointer = seat.get_pointer();
+    auto touch = seat.get_touch();
+
+    std::string_view xdg_runtime_dir = std::getenv("XDG_RUNTIME_DIR");
+    if (xdg_runtime_dir.empty() || !std::filesystem::exists(xdg_runtime_dir)) {
+        return -1;
+    }
+    std::string_view tmp_file_title = "/weston-shared-XXXXXX";
+    if (1024 <= xdg_runtime_dir.size() + tmp_file_title.size()) {
+        return -1;
+    }
+    char tmp_path[1024] = { };
+    auto p = std::strcat(tmp_path, xdg_runtime_dir.data());
+    std::strcat(p, tmp_file_title.data());
+    int fd = mkostemp(tmp_path, O_CLOEXEC);
+    if (fd >= 0) {
+        unlink(tmp_path);
+    }
+    else {
+        std::cerr << "Failed to mkostemp..." << std::endl;
+        return -1;
+    }
+    constexpr int cx = 640;
+    constexpr int cy = 480;
+    if (ftruncate(fd, 4*cx*cy) < 0) {
+        std::cerr << "Failed to ftruncate..." << std::endl;
+        close(fd);
+        return -1;
+    }
+    auto data = mmap(nullptr, 4*cx*cy, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (data == MAP_FAILED) {
+        std::cerr << "Failed to mmap..." << std::endl;
+        close(fd);
+        return -1;
+    }
+    auto buffer = shm.create_pool(fd, 4*cx*cy).create_buffer(0, cx, cy, cx*4, wayland::shm_format::xrgb8888);
+
+    surface.attach(buffer, 0, 0);
+    surface.damage(0, 0, cx, cy);
+    surface.commit();
+
+    while (running) {
+        display.dispatch();
     }
     return 0;
 }
