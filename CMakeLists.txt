@@ -55,4 +55,4 @@ target_link_libraries(mavros
 
 add_custom_target(run
   DEPENDS mavros
-  COMMAND WAYLAND_DEBUG=1 ./mavros)
+  COMMAND mavros)
