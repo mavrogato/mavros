@@ -52,6 +52,14 @@ namespace std
         }(std::make_index_sequence<std::tuple_size<T>::value>());
         return output.put(')');
     }
+
+    template <class Ch>
+    auto& operator<<(std::basic_ostream<Ch>& output, std::source_location const& loc) noexcept {
+        return output << loc.file_name() << ':'
+                      << loc.line()      << ':'
+                      << loc.column()    << ':'
+                      << loc.function_name();
+    }
 } // ::std
 
 namespace aux
@@ -77,10 +85,7 @@ namespace aux
             }
         template <class Ch>
         friend auto& operator<<(std::basic_ostream<Ch>& output, application_error const& ex) {
-            return output << ex.loc.file_name() << ':'
-                          << ex.loc.line() << ':'
-                          << ex.loc.column() << ':'
-                          << ex.loc.function_name() << ": " << ex.what();
+            return output << ex.loc << ": " << ex.what();
         }
     };
 
@@ -91,6 +96,10 @@ namespace aux
         }
         return std::unique_ptr<T, D>(ptr, del);
     }
+    // template <class T, class D>
+    // auto safe_ptr(std::nullptr_t, D del) {
+    //     return std::unique_ptr<T, D>(nullptr, del);
+    // }
 
 } // ::aux
 
@@ -109,7 +118,6 @@ namespace aux::inline wayland_client_helper
     template <> constexpr std::string_view wl_interface_name<WL_CLIENT> = #WL_CLIENT; \
     template <> constexpr void (*wl_deleter<WL_CLIENT>)(WL_CLIENT*) = DELETER;     \
     template <> struct wl_listener<WL_CLIENT> { using type = LISTENER; };
-
     INTERN_WL_CLIENT_CONCEPT(wl_display,            wl_display_disconnect,         wl_display_listener)
     INTERN_WL_CLIENT_CONCEPT(wl_registry,           wl_registry_destroy,           wl_registry_listener)
     INTERN_WL_CLIENT_CONCEPT(wl_compositor,         wl_compositor_destroy,         void)
@@ -125,14 +133,16 @@ namespace aux::inline wayland_client_helper
     INTERN_WL_CLIENT_CONCEPT(zxdg_surface_v6,       zxdg_surface_v6_destroy,       zxdg_surface_v6_listener)
     INTERN_WL_CLIENT_CONCEPT(zxdg_toplevel_v6,      zxdg_toplevel_v6_destroy,      zxdg_toplevel_v6_listener)
     INTERN_WL_CLIENT_CONCEPT(zwp_tablet_manager_v2, zwp_tablet_manager_v2_destroy, void)
-
 # undef  INTERN_WL_CLIENT_CONCEPT
 
+    // template <wl_client T>
+    // auto safe_ptr() noexcept {
+    //     return aux::safe_ptr<T>(nullptr, wl_deleter<T>);
+    // }
     template <wl_client T>
     auto safe_ptr(T* ptr, sloc loc = sloc::current()) {
         return aux::safe_ptr(ptr, wl_deleter<T>, loc);
     }
-
     template <wl_client_with_listener T>
     auto safe_ptr(T* ptr,
                   wl_listener_type<T>&& listener,
@@ -152,8 +162,8 @@ namespace aux::inline wayland_client_helper
         return static_cast<T*>(::wl_registry_bind(registry, name, wl_interface_ptr<T>, version));
     }
 
-    inline auto allocate_buffer(wl_shm* shm, size_t cx, size_t cy,
-                                wl_shm_format format = WL_SHM_FORMAT_ARGB8888, size_t bypp = 4) {
+    template <class T = uint32_t, wl_shm_format format = WL_SHM_FORMAT_ARGB8888, size_t bypp = 4>
+    inline auto allocate_buffer(wl_shm* shm, size_t cx, size_t cy) {
         std::string_view xdg_runtime_dir = std::getenv("XDG_RUNTIME_DIR");
         if (xdg_runtime_dir.empty() || !std::filesystem::exists(xdg_runtime_dir)) {
             throw application_error("No XDG_RUNTIME_DIR settings...");
@@ -184,7 +194,7 @@ namespace aux::inline wayland_client_helper
         return std::tuple{
             safe_ptr(wl_shm_pool_create_buffer(safe_ptr(wl_shm_create_pool(shm, fd, bypp*cx*cy)).get(),
                                                0, cx, cy, bypp * cx, format)),
-            static_cast<uint32_t*>(data),
+            static_cast<T*>(data),
         };
     }
 
@@ -194,7 +204,7 @@ int main() {
     using namespace aux;
     try {
         auto display = safe_ptr(wl_display_connect(nullptr));
-        wl_compositor* compositor_raw = nullptr;
+        wl_compositor* compositor_raw;
         wl_shm* shm_raw = nullptr;
         wl_seat* seat_raw = nullptr;
         zxdg_shell_v6* shell_raw = nullptr;
@@ -348,9 +358,9 @@ int main() {
         // std::cout << que.get_device().get_info<sycl::info::device::name>() << std::endl;
         // std::cout << que.get_device().get_info<sycl::info::device::vendor>() << std::endl;
 
-        do {
+        while (wl_display_dispatch(display.get()) != -1) {
             if (cx && cy) {
-                static constexpr size_t N = 65536;
+                static constexpr size_t N = 256;
                 static constexpr double PI = std::numbers::pi;
                 static constexpr double TAU = PI * 2.0;
                 static constexpr double PHI = std::numbers::phi;
@@ -362,35 +372,36 @@ int main() {
                         apv[idx] = 0xFF000000;
                     });
                 });
-                if (strokes.empty() == false && strokes.begin()->second.empty() == false) {
-                    auto const& vertices = strokes.begin()->second;
-                    auto vv = sycl::buffer<std::complex<double>, 1>{vertices.data(), vertices.size()};
-                    que.submit([&](auto& h) noexcept {
-                        auto apv = pv.get_access<sycl::access::mode::read_write>(h);
-                        auto avv = vv.get_access<sycl::access::mode::read>(h);
-                        h.parallel_for({vertices.size(), N}, [=](auto idx) noexcept {
-                            auto n = idx[1];
-                            auto pt = avv[idx[0]] + std::polar(sqrt(n)/3, n*TAU*PHI);
-                            auto d = 1.0 - ((double)n/N);
-                            auto y = pt.imag();
-                            auto x = pt.real();
-                            if (0 <= x && x < cx && 0 <= y && y < cy) {
-                                uint8_t b = d * 255;
-                                auto v = reinterpret_cast<uint8_t*>(&apv[{(size_t) y, (size_t) x}]);
-                                v[0] = std::max(v[0], b);
-                                v[1] = std::max(v[1], b);
-                                v[2] = std::max(v[2], b);
-                                v[3] = std::max(v[3], b);
-                            }
+                for (auto const& stroke : strokes) {
+                    if (auto const& vertices = stroke.second; !vertices.empty()) {
+                        auto vv = sycl::buffer<std::complex<double>, 1>{vertices.data(), vertices.size()};
+                        que.submit([&](auto& h) noexcept {
+                            auto apv = pv.get_access<sycl::access::mode::read_write>(h);
+                            auto avv = vv.get_access<sycl::access::mode::read>(h);
+                            h.parallel_for({vertices.size(), N}, [=](auto idx) noexcept {
+                                auto n = idx[1];
+                                auto pt = avv[idx[0]] + std::polar(sqrt(n)/3, n*TAU*PHI);
+                                auto d = 1.0 - ((double)n/N);
+                                auto y = pt.imag();
+                                auto x = pt.real();
+                                if (0 <= x && x < cx && 0 <= y && y < cy) {
+                                    uint8_t b = d * 255;
+                                    auto v = reinterpret_cast<uint8_t*>(&apv[{(size_t) y, (size_t) x}]);
+                                    v[0] = std::max(v[0], b);
+                                    v[1] = std::max(v[1], b);
+                                    v[2] = std::max(v[2], b);
+                                    v[3] = std::max(v[3], b);
+                                }
+                            });
                         });
-                    });
+                    }
                 }
-                wl_surface_damage(surface.get(), 0, 0, cx, cy);
-                wl_surface_attach(surface.get(), buffer.get(), 0, 0);
             }
+            wl_surface_damage(surface.get(), 0, 0, cx, cy);
+            wl_surface_attach(surface.get(), buffer.get(), 0, 0);
             wl_surface_commit(surface.get());
             wl_display_flush(display.get());
-        } while (wl_display_dispatch(display.get()) != -1);
+        }
     }
     catch (application_error& ex) {
         std::cout << ex << std::endl;
