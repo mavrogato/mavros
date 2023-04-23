@@ -96,10 +96,6 @@ namespace aux
         }
         return std::unique_ptr<T, D>(ptr, del);
     }
-    // template <class T, class D>
-    // auto safe_ptr(std::nullptr_t, D del) {
-    //     return std::unique_ptr<T, D>(nullptr, del);
-    // }
 
 } // ::aux
 
@@ -135,10 +131,6 @@ namespace aux::inline wayland_client_helper
     INTERN_WL_CLIENT_CONCEPT(zwp_tablet_manager_v2, zwp_tablet_manager_v2_destroy, void)
 # undef  INTERN_WL_CLIENT_CONCEPT
 
-    // template <wl_client T>
-    // auto safe_ptr() noexcept {
-    //     return aux::safe_ptr<T>(nullptr, wl_deleter<T>);
-    // }
     template <wl_client T>
     auto safe_ptr(T* ptr, sloc loc = sloc::current()) {
         return aux::safe_ptr(ptr, wl_deleter<T>, loc);
@@ -355,12 +347,12 @@ int main() {
         wl_surface_commit(surface.get());
 
         auto que = sycl::queue();
-        // std::cout << que.get_device().get_info<sycl::info::device::name>() << std::endl;
-        // std::cout << que.get_device().get_info<sycl::info::device::vendor>() << std::endl;
+        std::cout << que.get_device().get_info<sycl::info::device::name>() << std::endl;
+        std::cout << que.get_device().get_info<sycl::info::device::vendor>() << std::endl;
 
         while (wl_display_dispatch(display.get()) != -1) {
             if (cx && cy) {
-                static constexpr size_t N = 256;
+                static constexpr size_t N = 256*256;
                 static constexpr double PI = std::numbers::pi;
                 static constexpr double TAU = PI * 2.0;
                 static constexpr double PHI = std::numbers::phi;
