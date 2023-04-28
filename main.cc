@@ -12,6 +12,7 @@
 #include <complex>
 #include <numbers>
 #include <coroutine>
+#include <ranges>
 
 #include <cstring>
 
@@ -117,6 +118,7 @@ namespace aux::inline wayland_client_helper
     INTERN_WL_CLIENT_CONCEPT(wl_display,            wl_display_disconnect,         wl_display_listener)
     INTERN_WL_CLIENT_CONCEPT(wl_registry,           wl_registry_destroy,           wl_registry_listener)
     INTERN_WL_CLIENT_CONCEPT(wl_compositor,         wl_compositor_destroy,         void)
+    INTERN_WL_CLIENT_CONCEPT(wl_output,             wl_output_destroy,             wl_output_listener)
     INTERN_WL_CLIENT_CONCEPT(wl_shm,                wl_shm_destroy,                wl_shm_listener)
     INTERN_WL_CLIENT_CONCEPT(wl_seat,               wl_seat_destroy,               wl_seat_listener)
     INTERN_WL_CLIENT_CONCEPT(wl_surface,            wl_surface_destroy,            wl_surface_listener)
@@ -154,7 +156,7 @@ namespace aux::inline wayland_client_helper
         return static_cast<T*>(::wl_registry_bind(registry, name, wl_interface_ptr<T>, version));
     }
 
-    template <class T = uint32_t, wl_shm_format format = WL_SHM_FORMAT_ARGB8888, size_t bypp = 4>
+    template <class T = uint32_t, wl_shm_format format = WL_SHM_FORMAT_XRGB8888, size_t bypp = 4>
     inline auto allocate_buffer(wl_shm* shm, size_t cx, size_t cy) {
         std::string_view xdg_runtime_dir = std::getenv("XDG_RUNTIME_DIR");
         if (xdg_runtime_dir.empty() || !std::filesystem::exists(xdg_runtime_dir)) {
@@ -197,6 +199,7 @@ int main() {
     try {
         auto display = safe_ptr(wl_display_connect(nullptr));
         wl_compositor* compositor_raw;
+        std::vector<wl_output*> output_raw_list;
         wl_shm* shm_raw = nullptr;
         wl_seat* seat_raw = nullptr;
         zxdg_shell_v6* shell_raw = nullptr;
@@ -208,6 +211,9 @@ int main() {
                                     uint32_t version) noexcept {
                     if (interface == wl_interface_name<wl_compositor>) {
                         compositor_raw = wl_registry_bind<wl_compositor>(registry, name, version);
+                    }
+                    else if (interface == wl_interface_name<wl_output>) {
+                        output_raw_list.emplace_back(wl_registry_bind<wl_output>(registry, name, version));
                     }
                     else if (interface == wl_interface_name<wl_shm>) {
                         shm_raw = wl_registry_bind<wl_shm>(registry, name, version);
@@ -229,11 +235,40 @@ int main() {
         wl_display_roundtrip(display.get());
 
         auto compositor = safe_ptr(compositor_raw);
+
+        auto output_list_view = std::views::transform(output_raw_list, [](auto ptr) {
+            std::cout << "do transform!" << std::endl;
+            return safe_ptr(ptr, {
+                    .geometry = lamed([](auto... args) {
+                        std::cout << "output geometry: " << std::tuple{args...} << std::endl;
+                    }),
+                    .mode = lamed([](auto... args) {
+                        std::cout << "output mode: " << std::tuple{args...} << std::endl;
+                    }),
+                    .done = lamed([](auto... args) {
+                        std::cout << "output done: " << std::tuple{args...} << std::endl;
+                    }),
+                    .scale = lamed([](auto... args) {
+                        std::cout << "output scale: " << std::tuple{args...} << std::endl;
+                    }),
+                    .name = lamed([](auto... args) {
+                        std::cout << "output name: " << std::tuple{args...} << std::endl;
+                    }),
+                    .description = lamed([](auto... args) {
+                        std::cout << "output description: " << std::tuple{args...} << std::endl;
+                    }),
+                });
+        });
+        for (auto item : output_list_view) {
+            auto& [output, listener] = item;
+            std::cout << wl_output_get_version(output.get()) << std::endl;
+        }
+
         auto surface = safe_ptr(wl_compositor_create_surface(compositor.get()));
 
         auto [shm, shm_listener] = safe_ptr(shm_raw, {
                 .format = lamed([&](auto, wl_shm* shm, uint32_t format) {
-                    if (format == WL_SHM_FORMAT_ARGB8888) {
+                    if (format == WL_SHM_FORMAT_XRGB8888) {
                         std::cout << "OK" << std::endl;
                     }
                 }),
@@ -361,7 +396,7 @@ int main() {
                 que.submit([&](auto& h) noexcept {
                     auto apv = pv.get_access<sycl::access::mode::write>(h);
                     h.parallel_for({cy, cx}, [=](auto idx) noexcept {
-                        apv[idx] = 0xFF000000;
+                        apv[idx] = 0x00000000;
                     });
                 });
                 for (auto const& stroke : strokes) {
